@@ -3,6 +3,7 @@ import { newId, newReference } from './ids.js';
 import { Queue } from './waitlistQueue.js';
 
 export const MAX_TICKETS_PER_BOOKING = 10;
+export const WAITLIST_OFFER_TTL_MS = 15 * 60 * 1000;
 
 function validateStore(store) {
   if (
@@ -11,7 +12,9 @@ function validateStore(store) {
     !(store.tiers instanceof Map) ||
     !(store.bookings instanceof Map) ||
     !(store.bookingsByReference instanceof Map) ||
-    !(store.waitlists instanceof Map)
+    !(store.waitlists instanceof Map) ||
+    !(store.waitlistOffers instanceof Map) ||
+    !(store.activeWaitlistOfferKeys instanceof Set)
   ) {
     throw new DomainError('VALIDATION', 'A valid store is required');
   }
@@ -43,7 +46,7 @@ function requireQuantity(quantity) {
 
 export function seatsLeft(tier) {
   validateStoreHolder(tier);
-  return tier.capacity - tier.sold;
+  return tier.capacity - tier.sold - (tier.reserved ?? 0);
 }
 
 function validateStoreHolder(value) {
@@ -75,6 +78,8 @@ export function createStore() {
     bookings: new Map(),
     bookingsByReference: new Map(),
     waitlists: new Map(),
+    waitlistOffers: new Map(),
+    activeWaitlistOfferKeys: new Set(),
   };
 }
 
@@ -125,6 +130,7 @@ export function addTier(store, eventId, input = {}) {
     priceCents: requireWholeNumber(input.priceCents, 'priceCents', 0),
     capacity: requireWholeNumber(input.capacity, 'capacity', 1),
     sold: 0,
+    reserved: 0,
   };
   store.tiers.set(tier.id, tier);
   store.waitlists.set(tier.id, new Queue());
@@ -198,6 +204,15 @@ export function joinWaitlist(store, tierId, userId, quantity) {
   }
 
   const queue = store.waitlists.get(tierId);
+  for (const entry of queue.toArray()) {
+    if (entry.userId === userId) {
+      throw new DomainError('DUPLICATE_WAITLIST_ENTRY', 'You are already on this waitlist');
+    }
+  }
+  const offerKey = `${tierId}:${userId}`;
+  if (store.activeWaitlistOfferKeys.has(offerKey)) {
+    throw new DomainError('DUPLICATE_WAITLIST_ENTRY', 'You already have an active waitlist offer');
+  }
   queue.enqueue({ userId, quantity });
   return { position: queue.size };
 }
@@ -207,5 +222,107 @@ export function offerNextOnWaitlist(store, tierId) {
   const queue = store.waitlists.get(tierId);
   const next = queue.peek();
   if (!next || seatsLeft(tier) < next.quantity) return undefined;
-  return queue.dequeue();
+  const waiting = queue.dequeue();
+  const offerKey = `${tierId}:${waiting.userId}`;
+
+  tier.reserved += waiting.quantity;
+  const offer = {
+    id: newId(),
+    tierId,
+    userId: waiting.userId,
+    quantity: waiting.quantity,
+    status: 'offered',
+    expiresAt: new Date(Date.now() + WAITLIST_OFFER_TTL_MS).toISOString(),
+  };
+  store.waitlistOffers.set(offer.id, offer);
+  store.activeWaitlistOfferKeys.add(offerKey);
+  return offer;
+}
+
+function getWaitlistOffer(store, offerOrId) {
+  validateStore(store);
+  const offerId = typeof offerOrId === 'string' ? offerOrId : offerOrId?.id;
+  requireText(offerId, 'offerId');
+  const offer = store.waitlistOffers.get(offerId);
+  if (!offer) throw new DomainError('NOT_FOUND', 'Waitlist offer not found');
+  return offer;
+}
+
+function releaseWaitlistReservation(store, offer) {
+  if (offer.status !== 'offered') {
+    throw new DomainError('INVALID_STATE', `A ${offer.status} waitlist offer cannot be released`);
+  }
+  const tier = getTier(store, offer.tierId);
+  tier.reserved -= offer.quantity;
+  if (tier.reserved < 0) {
+    tier.reserved = 0;
+  }
+  const offerKey = `${offer.tierId}:${offer.userId}`;
+  store.activeWaitlistOfferKeys.delete(offerKey);
+}
+
+export function acceptWaitlistOffer(store, offerOrId) {
+  const offer = getWaitlistOffer(store, offerOrId);
+  if (offer.status !== 'offered') {
+    throw new DomainError('INVALID_STATE', `A ${offer.status} waitlist offer cannot be accepted`);
+  }
+  if (Date.now() >= new Date(offer.expiresAt).getTime()) {
+    expireWaitlistOffer(store, offer.id);
+    throw new DomainError('OFFER_EXPIRED', 'The waitlist offer has expired');
+  }
+
+  const tier = getTier(store, offer.tierId);
+  let reference;
+  do {
+    reference = newReference();
+  } while (store.bookingsByReference.has(reference));
+
+  tier.reserved -= offer.quantity;
+  tier.sold += offer.quantity;
+  const booking = {
+    id: newId(),
+    reference,
+    userId: offer.userId,
+    tierId: offer.tierId,
+    quantity: offer.quantity,
+    amountCents: tier.priceCents * offer.quantity,
+    status: 'pending',
+  };
+  offer.status = 'accepted';
+  store.bookings.set(booking.id, booking);
+  store.bookingsByReference.set(reference, booking);
+  store.activeWaitlistOfferKeys.delete(`${offer.tierId}:${offer.userId}`);
+  return booking;
+}
+
+export function rejectWaitlistOffer(store, offerOrId) {
+  const offer = getWaitlistOffer(store, offerOrId);
+  releaseWaitlistReservation(store, offer);
+  offer.status = 'rejected';
+  return offer;
+}
+
+export function expireWaitlistOffer(store, offerOrId) {
+  const offer = getWaitlistOffer(store, offerOrId);
+  releaseWaitlistReservation(store, offer);
+  offer.status = 'expired';
+  return offer;
+}
+
+export function expireWaitlistOffers(store, now = Date.now()) {
+  validateStore(store);
+  const timestamp = typeof now === 'number' ? now : new Date(now).getTime();
+  if (!Number.isFinite(timestamp)) {
+    throw new DomainError('VALIDATION', 'now must be a valid time');
+  }
+
+  const expired = [];
+  for (const offer of store.waitlistOffers.values()) {
+    if (offer.status === 'offered' && timestamp >= new Date(offer.expiresAt).getTime()) {
+      releaseWaitlistReservation(store, offer);
+      offer.status = 'expired';
+      expired.push(offer);
+    }
+  }
+  return expired;
 }
