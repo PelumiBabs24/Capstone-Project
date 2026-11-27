@@ -113,3 +113,11 @@ npm run demo passes.
 npm run benchmark passes.
 Branch remains build-1; nothing was pushed or modified on main.
 What was wrong (or "nothing"):nothing
+
+Build 2
+
+Prompt: Implement event publishing and summaries, stable merge sort, event filtering/search/sorting, and tests for Build 2 acceptance criteria.
+
+What came back: Added domain sorting and search helpers, publishing and summary functions, unpublishing to satisfy the S04 acceptance criteria, a Node test script, and acceptance-focused tests.
+
+What was wrong (or "nothing"): The first date-sort test expected title order before considering that one event had an earlier time on the same day. The test expectation was corrected to check chronological order first, then title and id for equal timestamps. No implementation rule was uncertain.

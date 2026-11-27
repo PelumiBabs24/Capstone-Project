@@ -95,10 +95,7 @@ export function createEvent(store, input = {}) {
   if (typeof input.startsAt !== 'string') {
     throw new DomainError('VALIDATION', 'startsAt must be a valid date');
   }
-  const date = new Date(input.startsAt);
-  if (Number.isNaN(date.getTime())) {
-    throw new DomainError('VALIDATION', 'startsAt must be a valid date');
-  }
+  const date = parseEventDate(input.startsAt);
   if (input.venue !== undefined && typeof input.venue !== 'string') {
     throw new DomainError('VALIDATION', 'venue must be text');
   }
@@ -115,6 +112,90 @@ export function createEvent(store, input = {}) {
   };
   store.events.set(event.id, event);
   return event;
+}
+
+function parseEventDate(value) {
+  if (typeof value !== 'string') {
+    throw new DomainError('VALIDATION', 'startsAt must be a valid ISO date');
+  }
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})(?:T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2}))?$/.exec(
+      value,
+    );
+  const date = new Date(value);
+  if (!match || Number.isNaN(date.getTime())) {
+    throw new DomainError('VALIDATION', 'startsAt must be a valid ISO date');
+  }
+  const [, yearText, monthText, dayText] = match;
+  const calendarDate = new Date(Date.UTC(Number(yearText), Number(monthText) - 1, Number(dayText)));
+  if (
+    calendarDate.getUTCFullYear() !== Number(yearText) ||
+    calendarDate.getUTCMonth() !== Number(monthText) - 1 ||
+    calendarDate.getUTCDate() !== Number(dayText)
+  ) {
+    throw new DomainError('VALIDATION', 'startsAt must be a real ISO date');
+  }
+  return date;
+}
+
+export function publishEvent(store, eventId) {
+  const event = getEvent(store, eventId);
+  if (event.tierIds.length === 0) {
+    throw new DomainError('INVALID_STATE', 'Add at least one ticket tier before publishing');
+  }
+  event.status = 'published';
+  return event;
+}
+
+export function unpublishEvent(store, eventId) {
+  const event = getEvent(store, eventId);
+  event.status = 'draft';
+  return event;
+}
+
+export function listEventSummaries(store, options = {}) {
+  validateStore(store);
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new DomainError('VALIDATION', 'options must be an object');
+  }
+  const { publishedOnly = true } = options;
+  if (typeof publishedOnly !== 'boolean') {
+    throw new DomainError('VALIDATION', 'publishedOnly must be a boolean');
+  }
+
+  return [...store.events.values()]
+    .filter((event) => !publishedOnly || event.status === 'published')
+    .map((event) => {
+      const tiers = event.tierIds.map((tierId) => {
+        const tier = store.tiers.get(tierId);
+        if (!tier) throw new DomainError('NOT_FOUND', `Ticket tier ${tierId} not found`);
+        return {
+          id: tier.id,
+          name: tier.name,
+          priceCents: tier.priceCents,
+          capacity: tier.capacity,
+          sold: tier.sold,
+          reserved: tier.reserved ?? 0,
+          availableSeats: seatsLeft(tier),
+        };
+      });
+      const cheapestPriceCents =
+        tiers.length === 0 ? undefined : Math.min(...tiers.map((tier) => tier.priceCents));
+      const availableSeats = tiers.reduce((total, tier) => total + tier.availableSeats, 0);
+
+      return {
+        id: event.id,
+        organizerId: event.organizerId,
+        title: event.title,
+        city: event.city,
+        venue: event.venue,
+        startsAt: event.startsAt,
+        status: event.status,
+        tiers,
+        cheapestPriceCents,
+        availableSeats,
+      };
+    });
 }
 
 export function addTier(store, eventId, input = {}) {
