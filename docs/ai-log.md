@@ -1,6 +1,12 @@
 Build 1
+
+
 Prompt 1: Build 1 prompt (docs/build-1.md)
+
+
 What I asked: Explain and check for bugs in waitlistQueue.js line 1 -52
+
+
 What came back:How it works
 waitlistQueue.js implements a FIFO queue using a linked list.
 
@@ -75,15 +81,21 @@ Minor point
 The queue is generic, but it does not itself validate values. It accepts undefined, null, or any JavaScript value. If the waitlist requires valid entries, validation belongs in joinWaitlist(), which it already performs for the user ID and quantity.
 
 The class could also remain simple and omit toArray(), but it is useful for tests and debugging.
+
+
 What was wrong (or "nothing"):I noticed a waitlist bug occurs because offering tickets removes a customer from the queue without reserving the available seats. As a result, multiple customers can receive offers for the same seats, causing over-allocation.
 
 
 
 
 Prompt 2:
+
+
 What I asked:Fix the waitlist bug: reserve seats immediately when offering tickets, prevent duplicate offers, and release reservations when offers are accepted, rejected or expire. Preserve FIFO order and add tests for all scenarios.
 
 Follow existing project conventions. Work only on `build-1`; never push to or modify shared `main`. Ensure money remains stored as whole integers in kobo/cents.
+
+
 What came back:Updated the waitlist implementation on build-1.
 
 Changes:
